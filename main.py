@@ -23,6 +23,20 @@ pending_spawn = False
 XP_PER_CHARACTER = 0.2
 LEVEL_MULTIPLIER = 1.5
 
+def removestats():
+    try:
+        with open('datas.json', 'r') as f:
+            data = json.loads(f.read())
+        
+        for userid in data:
+            for pokemon in data[userid]:
+                if 'stats' in pokemon:
+                    del pokemon['stats']
+        with open('datas.json', 'w') as f:
+            json.dump(data, f, indent=4)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
 def getpokemonID(identifier):
     url = f'https://pokeapi.co/api/v2/pokemon/{identifier}'
     res = requests.get(url)
@@ -43,10 +57,10 @@ def evolvePokemon(userid, pokemon, evolutionchainjson):
             if chain_link['evolves_to']:
                 # Check evolution conditions
                 evolution = chain_link['evolves_to'][0]
-                min_level = evolution.get('evolution_details', [{}])[0].get('min_level', 0)
+                #min_level = evolution.get('evolution_details', [{}])[0].get('min_level', 0)
                 
-                if pokemon['level'] >= min_level:
-                    return evolution['species']['name']
+                #if pokemon['level'] >= min_level:
+                return evolution['species']['name']
                     
         for evolve in chain_link['evolves_to']:
             result = find_next_evolution(evolve, current)
@@ -55,6 +69,7 @@ def evolvePokemon(userid, pokemon, evolutionchainjson):
         return None
 
     next_evolution = find_next_evolution(chain, current_name)
+    print(next_evolution)
     
     if next_evolution:
         evolved_data = getapi(next_evolution)
@@ -64,8 +79,9 @@ def evolvePokemon(userid, pokemon, evolutionchainjson):
         evolved_pokemon['level'] = pokemon['level']
         evolved_pokemon['xp'] = pokemon['xp']
         evolved_pokemon['iv'] = pokemon['iv']
-
+        
         try:
+            '''
             with open('datas.json', 'r') as f:
                 data = json.loads(f.read())
             
@@ -78,6 +94,7 @@ def evolvePokemon(userid, pokemon, evolutionchainjson):
                         
             with open('datas.json', 'w') as f:
                 json.dump(data, f, indent=4)
+            '''
                 
             return evolved_pokemon
             
@@ -104,14 +121,15 @@ def add_experience(userid,length):
             if 'xp' not in pokemon:
                 pokemon['xp'] = 0
             
+            if pokemon['level'] >= 100:
+                return False, None, None, False, None
             # Increase XP gain based on level
             level_bonus = pokemon['level'] * 0.5
             pokemon['xp'] += (XP_PER_CHARACTER * length) + level_bonus
             
             # Make XP needed scale with level
             xp_needed = int(pokemon['level'] * 100 * LEVEL_MULTIPLIER)
-            if 'xp_needed' not in pokemon:
-                pokemon['xp_needed'] = xp_needed
+            pokemon['xp_needed'] = xp_needed
             
             if pokemon['xp'] >= xp_needed:
                 pokemon['level'] += 1
@@ -133,10 +151,16 @@ def add_experience(userid,length):
                         evo_url = species_data['evolution_chain']['url']
                         chain_id = evo_url.split('/')[-2]
 
+                        print(f'evolving {pokemon["name"]} with chain id {chain_id}')
+
                         evo_chain = getevolutionchain(chain_id)
+                        #print(evo_chain)
                         evolved_pokemon = evolvePokemon(userid, pokemon, evo_chain)
+
+                        print(evolved_pokemon)
                         
                         if evolved_pokemon:
+                            prev_poke = pokemon
                             pokemon = evolved_pokemon
                             evolved = True
                     except:
@@ -146,12 +170,11 @@ def add_experience(userid,length):
             with open('datas.json', 'w') as f:
                 json.dump(pokemon_data, f, indent=4)
 
-            return leveled_up, pokemon['name'], pokemon['level'], evolved
+            return leveled_up, pokemon['name'], pokemon['level'], evolved, prev_poke['name'] if evolved else None
 
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     return False, None, None, False
-
 
 def getapi(identifier):
     url = f'https://pokeapi.co/api/v2/pokemon/{identifier}'
@@ -203,14 +226,14 @@ def spawnPokemon(res):
     #print(f'LEVEL: {randLvl}')
     types = getTypes(res)
     abilities = getAbilities(res)
-    stats = getStats(res)
+    #stats = getStats(res)
     iv = generateIVs()
     sprite = getBaseSprite(res)
     #moves = getPossibleMoves(res,randLvl)
     #for index,move in enumerate(moves):
         #move = (move['move']['name'],move['version_group_details'][0]['level_learned_at'])
         #moves[index] = move
-    return {'name':res['name'],'types':types,'abilities':abilities,'stats':stats,'sprite':sprite,'iv':iv,'level':randLvl}
+    return {'name':res['name'],'types':types,'abilities':abilities,'sprite':sprite,'iv':iv,'level':randLvl}
 
 def savePokemon(data, userid):
     try:
@@ -308,14 +331,14 @@ async def check_spawn_condition(channel):
 class Client(commands.Bot):
     async def on_ready(self):
         print(f'logged as {self.user}')
-        try:
-            guild = discord.Object(id=DEVSERVER_ID)
-            self.tree.clear_commands(guild=guild)
-            synced = await self.tree.sync()
-            print(f'synced {len(synced)} commands')
-            print(f'locally cleared commands')
-        except Exception as e:
-            print(e)
+        #try:
+            #guild = discord.Object(id=DEVSERVER_ID)
+            #self.tree.clear_commands(guild=guild)
+            #synced = await self.tree.sync()
+            #print(f'synced {len(synced)} commands')
+            #print(f'locally cleared commands')
+        #except Exception as e:
+            #print(e)
     
     async def on_message(self, message):
         if message.author.bot:
@@ -323,17 +346,16 @@ class Client(commands.Bot):
         message_timestamps.append(datetime.now())
         await check_spawn_condition(message.channel)
 
-        leveled_up, pokemon_name, newlvl, evolved = add_experience(message.author.id,len(message.content))
+        leveled_up, pokemon_name, newlvl, evolved, prev_poke = add_experience(message.author.id,len(message.content))
         if leveled_up:
             if evolved:
-                await message.channel.send(f'{message.author.mention} Your {pokemon_name} evolved!')
+                await message.channel.send(f'{message.author.mention} Your {prev_poke} evolved to {pokemon_name}!')
             else:
                 await message.channel.send(f'{message.author.mention} Your {pokemon_name} leveled up to level {newlvl}!')
         
         await self.process_commands(message)
 
 
-    
 intents = discord.Intents.default()
 intents.message_content = True
 client = Client(command_prefix='!', intents=intents)
