@@ -20,6 +20,139 @@ MESSAGE_WINDOW = 300
 message_timestamps = []
 pending_spawn = False
 
+XP_PER_CHARACTER = 0.2
+LEVEL_MULTIPLIER = 1.5
+
+def getpokemonID(identifier):
+    url = f'https://pokeapi.co/api/v2/pokemon/{identifier}'
+    res = requests.get(url)
+    data = res.json()
+    return data['id']
+
+def getevolutionchain(identifier):
+    url = f'https://pokeapi.co/api/v2/evolution-chain/{identifier}'
+    res = requests.get(url)
+    return res.json()
+
+def evolvePokemon(userid, pokemon, evolutionchainjson):
+    chain = evolutionchainjson['chain']
+    current_name = pokemon['name']
+
+    def find_next_evolution(chain_link, current):
+        if chain_link['species']['name'] == current:
+            if chain_link['evolves_to']:
+                # Check evolution conditions
+                evolution = chain_link['evolves_to'][0]
+                min_level = evolution.get('evolution_details', [{}])[0].get('min_level', 0)
+                
+                if pokemon['level'] >= min_level:
+                    return evolution['species']['name']
+                    
+        for evolve in chain_link['evolves_to']:
+            result = find_next_evolution(evolve, current)
+            if result:
+                return result
+        return None
+
+    next_evolution = find_next_evolution(chain, current_name)
+    
+    if next_evolution:
+        evolved_data = getapi(next_evolution)
+        evolved_pokemon = spawnPokemon(evolved_data)
+        
+        # Preserve stats and level
+        evolved_pokemon['level'] = pokemon['level']
+        evolved_pokemon['xp'] = pokemon['xp']
+        evolved_pokemon['iv'] = pokemon['iv']
+
+        try:
+            with open('datas.json', 'r') as f:
+                data = json.loads(f.read())
+            
+            userid = str(userid)
+            if userid in data:
+                for i, p in enumerate(data[userid]):
+                    if p == pokemon:
+                        data[userid][i] = evolved_pokemon
+                        break
+                        
+            with open('datas.json', 'w') as f:
+                json.dump(data, f, indent=4)
+                
+            return evolved_pokemon
+            
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+            
+    return None
+
+def add_experience(userid,length):
+    evolved = False
+    leveled_up = False
+    try:
+        with open('buddy.json', 'r') as f:
+            buddy_data = json.loads(f.read())
+        
+        with open('datas.json', 'r') as f:
+            pokemon_data = json.loads(f.read())
+        
+        userid = str(userid)
+        if userid in buddy_data and pokemon_data:
+            buddy_idx = int(buddy_data[userid])
+            pokemon = pokemon_data[userid][buddy_idx]
+
+            if 'xp' not in pokemon:
+                pokemon['xp'] = 0
+            
+            # Increase XP gain based on level
+            level_bonus = pokemon['level'] * 0.5
+            pokemon['xp'] += (XP_PER_CHARACTER * length) + level_bonus
+            
+            # Make XP needed scale with level
+            xp_needed = int(pokemon['level'] * 100 * LEVEL_MULTIPLIER)
+            if 'xp_needed' not in pokemon:
+                pokemon['xp_needed'] = xp_needed
+            
+            if pokemon['xp'] >= xp_needed:
+                pokemon['level'] += 1
+                pokemon['xp'] = 0
+                leveled_up = True
+                
+                # Check evolution at specific level thresholds
+                evolution_levels = {
+                    'basic': [16, 32],
+                    'special': [36],
+                    'friendship': [20, 40]
+                }
+                
+                if pokemon['level'] in evolution_levels['basic'] or \
+                   pokemon['level'] in evolution_levels['special']:
+                    try:
+                        species_url = f'https://pokeapi.co/api/v2/pokemon-species/{pokemon["name"]}'
+                        species_data = requests.get(species_url).json()
+                        evo_url = species_data['evolution_chain']['url']
+                        chain_id = evo_url.split('/')[-2]
+
+                        evo_chain = getevolutionchain(chain_id)
+                        evolved_pokemon = evolvePokemon(userid, pokemon, evo_chain)
+                        
+                        if evolved_pokemon:
+                            pokemon = evolved_pokemon
+                            evolved = True
+                    except:
+                        pass
+
+            pokemon_data[userid][buddy_idx] = pokemon
+            with open('datas.json', 'w') as f:
+                json.dump(pokemon_data, f, indent=4)
+
+            return leveled_up, pokemon['name'], pokemon['level'], evolved
+
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return False, None, None, False
+
+
 def getapi(identifier):
     url = f'https://pokeapi.co/api/v2/pokemon/{identifier}'
     res = requests.get(url)
@@ -175,21 +308,31 @@ async def check_spawn_condition(channel):
 class Client(commands.Bot):
     async def on_ready(self):
         print(f'logged as {self.user}')
-        #try:
-            #guild = discord.Object(id=DEVSERVER_ID)
-            #self.tree.clear_commands(guild=guild)
-            #synced = await self.tree.sync()
-            #print(f'synced {len(synced)} commands')
-            #print(f'locally cleared commands')
-        #except Exception as e:
-            #print(e)
+        try:
+            guild = discord.Object(id=DEVSERVER_ID)
+            self.tree.clear_commands(guild=guild)
+            synced = await self.tree.sync()
+            print(f'synced {len(synced)} commands')
+            print(f'locally cleared commands')
+        except Exception as e:
+            print(e)
     
     async def on_message(self, message):
         if message.author.bot:
             return
         message_timestamps.append(datetime.now())
         await check_spawn_condition(message.channel)
+
+        leveled_up, pokemon_name, newlvl, evolved = add_experience(message.author.id,len(message.content))
+        if leveled_up:
+            if evolved:
+                await message.channel.send(f'{message.author.mention} Your {pokemon_name} evolved!')
+            else:
+                await message.channel.send(f'{message.author.mention} Your {pokemon_name} leveled up to level {newlvl}!')
+        
         await self.process_commands(message)
+
+
     
 intents = discord.Intents.default()
 intents.message_content = True
@@ -569,6 +712,53 @@ async def search(interaction: discord.Interaction, pokemon_name: str):
 
     await interaction.response.send_message(embed=create_embed(current_page), view=view)
                 
+@client.tree.command(name = 'select', description='Select a pokemon as your buddy')
+async def select(interaction: discord.Interaction, pokemon_id: int):
+    pokemon_id -= 1
+    try:
+        with open('datas.json', 'r') as f:
+            content = f.read()
+            item = json.loads(content) if content else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        item = {}
+    
+    userid = str(interaction.user.id)
+    if userid in item:
+        data = item[userid]
+        if pokemon_id >= len(data):
+            await interaction.response.send_message('Invalid pokemon id')
+            return
+        link = {userid: pokemon_id}
+        with open('buddy.json', 'w') as f:
+            json.dump(link, f, indent=4)
+        await interaction.response.send_message(f'{data[pokemon_id]["name"].capitalize()} is now your buddy!')
+
+@client.tree.command(name = 'buddy', description='Shows your buddy pokemon')
+async def buddy(interaction: discord.Interaction):
+    try:
+        with open('buddy.json', 'r') as f:
+            content = f.read()
+            item = json.loads(content) if content else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        item = {}
+    
+    userid = str(interaction.user.id)
+    if userid in item:
+        with open('datas.json', 'r') as f:
+            content = f.read()
+            data = json.loads(content) if content else {}
+        buddy = item[userid]
+        pokemon = data[userid][buddy]
+        embed = discord.Embed(title=pokemon['name'], color=0x00ff00)
+        embed.set_image(url=pokemon['sprite'])
+        embed.add_field(name='Level', value=pokemon['level'], inline=False)
+        embed.add_field(name='Types', value=', '.join(pokemon['types']), inline=False)
+        embed.add_field(name='Abilities', value=', '.join(pokemon['abilities']), inline=False)
+        embed.add_field(name='IVs', value=f"HP: {pokemon['iv']['hp']}, Attack: {pokemon['iv']['attack']}, Defense: {pokemon['iv']['defense']}, Special Attack: {pokemon['iv']['special-attack']}, Special Defense: {pokemon['iv']['special-defense']}, Speed: {pokemon['iv']['speed']}", inline=False)
+        embed.add_field(name='IV%', value= f'{pokemon['iv']['percent']}%', inline=False)
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message('You have no buddy pokemon')
 
 client.run(TOKEN)
 
